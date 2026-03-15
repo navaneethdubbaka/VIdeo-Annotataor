@@ -1,0 +1,14 @@
+# Environments
+.venv/
+venv/
+ENV/
+
+# Video Files
+*.mp4
+*.mov
+*.avi
+*.mkv
+
+# OS generated files
+.DS_Store
+Thumbs.db
