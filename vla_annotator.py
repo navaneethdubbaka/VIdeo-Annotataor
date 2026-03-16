@@ -154,8 +154,8 @@ def make_rot(elev=30, azim=-60):
     Rx=np.array([[1,0,0],[0,math.cos(el),-math.sin(el)],[0,math.sin(el),math.cos(el)]])
     return (Rx@Ry).astype(np.float64)
 
-R_HAND = make_rot(elev=0, azim=0)
-R_BODY = make_rot(elev=0, azim=0)
+R_HAND = make_rot(elev=10, azim=-15)
+R_BODY = make_rot(elev=10, azim=-15)
 
 def p3(pt, R, cx, cy, sc):
     """Project one 3D point → (x,y) int tuple."""
