@@ -170,6 +170,87 @@ def normalize_pose(xyz: np.ndarray, op_height_cm: float, robot_height_cm: float)
     scale = robot_height_cm / op_height_cm
     return xyz * scale
 
+
+def joint_angle(a: np.ndarray, b: np.ndarray, c: np.ndarray) -> float:
+    """Angle at vertex b formed by rays b→a and b→c, in degrees (0=straight, 180=fully folded)."""
+    ba = a - b;  bc = c - b
+    n_ba = np.linalg.norm(ba);  n_bc = np.linalg.norm(bc)
+    if n_ba < 1e-9 or n_bc < 1e-9:
+        return 0.0
+    cos_theta = np.dot(ba, bc) / (n_ba * n_bc)
+    return math.degrees(math.acos(float(np.clip(cos_theta, -1.0, 1.0))))
+
+
+def finger_joint_angles(lms_w: np.ndarray) -> dict:
+    """
+    Compute 14 finger-joint flexion angles from (21,3) world landmarks.
+    Keys: thumb_mcp, thumb_ip,
+          idx_mcp, idx_pip, idx_dip,
+          mid_mcp, mid_pip, mid_dip,
+          ring_mcp, ring_pip, ring_dip,
+          pinky_mcp, pinky_pip, pinky_dip
+    All values in degrees.
+    """
+    ja = joint_angle
+    l  = lms_w
+    return {
+        "thumb_mcp":  ja(l[0],  l[1],  l[2]),
+        "thumb_ip":   ja(l[1],  l[2],  l[3]),
+        "idx_mcp":    ja(l[0],  l[5],  l[6]),
+        "idx_pip":    ja(l[5],  l[6],  l[7]),
+        "idx_dip":    ja(l[6],  l[7],  l[8]),
+        "mid_mcp":    ja(l[0],  l[9],  l[10]),
+        "mid_pip":    ja(l[9],  l[10], l[11]),
+        "mid_dip":    ja(l[10], l[11], l[12]),
+        "ring_mcp":   ja(l[0],  l[13], l[14]),
+        "ring_pip":   ja(l[13], l[14], l[15]),
+        "ring_dip":   ja(l[14], l[15], l[16]),
+        "pinky_mcp":  ja(l[0],  l[17], l[18]),
+        "pinky_pip":  ja(l[17], l[18], l[19]),
+        "pinky_dip":  ja(l[18], l[19], l[20]),
+    }
+
+
+def classify_grasp(lms_w: np.ndarray):
+    """
+    Classify grasp type and compute aperture/contact from (21,3) world landmarks.
+    Returns (grasp_type: str, aperture_m: float, contact_state: str).
+
+    Grasp types: open | pinch | tripod | power | lateral | hook | unknown
+    Contact states: open | partial | closed
+    """
+    wrist = lms_w[0]
+
+    def _curl(tip_idx, mcp_idx):
+        d_tip = np.linalg.norm(lms_w[tip_idx] - wrist)
+        d_mcp = np.linalg.norm(lms_w[mcp_idx] - wrist)
+        return (d_tip / d_mcp) if d_mcp > 1e-9 else 1.0
+
+    c_t = _curl(4,  1)    # thumb
+    c_i = _curl(8,  5)    # index
+    c_m = _curl(12, 9)    # middle
+    c_r = _curl(16, 13)   # ring
+    c_p = _curl(20, 17)   # pinky
+
+    if c_t > 0.8 and c_i > 0.8 and c_m > 0.8 and c_r > 0.8 and c_p > 0.8:
+        grasp = "open"
+    elif c_t < 0.7 and c_i < 0.7 and c_m > 0.75 and c_r > 0.75 and c_p > 0.75:
+        grasp = "pinch"
+    elif c_t < 0.7 and c_i < 0.7 and c_m < 0.7 and c_r > 0.75 and c_p > 0.75:
+        grasp = "tripod"
+    elif c_t < 0.65 and c_i < 0.65 and c_m < 0.65 and c_r < 0.65 and c_p < 0.65:
+        grasp = "power"
+    elif c_t > 0.8 and c_i < 0.65 and c_m < 0.65 and c_r < 0.65 and c_p < 0.65:
+        # lateral: thumb near index-MCP side; hook: thumb free
+        grasp = "lateral" if np.linalg.norm(lms_w[4] - lms_w[5]) < 0.03 else "hook"
+    else:
+        grasp = "unknown"
+
+    aperture = float(np.linalg.norm(lms_w[4] - lms_w[8]))   # thumb-tip to index-tip
+    contact  = "closed" if aperture < 0.02 else ("open" if aperture > 0.08 else "partial")
+
+    return grasp, aperture, contact
+
 # ═══════════════════════════════════════════════════════════════════════════════
 #  UTILITIES
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -430,23 +511,6 @@ def draw_hand_panel(W, H, current_hands, rpy_data, cube_half=0.12):
             frm = local_frame(lm[a], lm[b])
             draw_orient(canvas, mid, frm, R, CX, CY, SC, length=0.012)
 
-    # RPY readout panel (bottom-left of this panel)
-    ry = H - 90
-    cv2.rectangle(canvas, (4, ry), (W-4, H-4), (248,248,248), -1)
-    cv2.rectangle(canvas, (4, ry), (W-4, H-4), BORDER, 1)
-    cv2.putText(canvas, "6-DoF  Roll / Pitch / Yaw  (deg)", (10, ry+14),
-                FONT, 0.32, TXT_G, 1, cv2.LINE_AA)
-    row = ry + 30
-    for side, col in [("Left", L_BGR), ("Right", R_BGR)]:
-        rpy = rpy_data.get(side)
-        if rpy:
-            r_, p_, y_ = rpy
-            txt = f"{side[:1]}  R:{r_:+6.1f}  P:{p_:+6.1f}  Y:{y_:+6.1f}"
-        else:
-            txt = f"{side[:1]}  —"
-        cv2.putText(canvas, txt, (10, row), FONT_B, 0.38, col, 1, cv2.LINE_AA)
-        row += 22
-
     # Legend
     ly = 12
     for lbl, col in [("Left", L_BGR), ("Right", R_BGR)]:
@@ -457,6 +521,102 @@ def draw_hand_panel(W, H, current_hands, rpy_data, cube_half=0.12):
         cv2.line(canvas, (W-70,ly), (W-60,ly), col, 2, cv2.LINE_AA)
         cv2.putText(canvas, lbl, (W-56, ly+4), FONT, 0.28, col, 1, cv2.LINE_AA)
         ly += 12
+
+    return canvas
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  CENTRE INFO STRIP  — RPY · Grasp · Joint Angles  (vertical panel)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def draw_info_panel(W, H, rpy_data, grasp_data, joint_data):
+    """
+    Narrow vertical strip sitting between the camera panel and the 3D panels.
+    Displays 6-DoF RPY, grasp classification, and per-finger joint angles for
+    each detected hand.
+
+    rpy_data   : dict  label → (roll, pitch, yaw) degrees
+    grasp_data : dict  label → (grasp_type, aperture_m, contact_state)
+    joint_data : dict  label → finger_joint_angles dict (14 keys)
+    """
+    canvas = np.full((H, W, 3), (248, 248, 248), np.uint8)
+    # thin right border is drawn by build_frame as a divider line
+
+    PAD = 6    # left padding
+    y   = 10
+
+    # ── Section header ───────────────────────────────────────────────────────
+    cv2.putText(canvas, "POSE / GRASP", (PAD, y), FONT, 0.30, TXT_G, 1, cv2.LINE_AA)
+    y += 3
+    cv2.line(canvas, (PAD, y), (W-PAD, y), BORDER, 1)
+    y += 8
+
+    for side, hcol in [("Left", L_BGR), ("Right", R_BGR)]:
+
+        # ── Hand label ───────────────────────────────────────────────────────
+        cv2.rectangle(canvas, (PAD, y-1), (PAD+4, y+9), hcol, -1)
+        cv2.putText(canvas, side, (PAD+8, y+8), FONT_B, 0.35, hcol, 1, cv2.LINE_AA)
+        y += 14
+
+        # ── RPY ──────────────────────────────────────────────────────────────
+        rpy = rpy_data.get(side)
+        if rpy:
+            r_, p_, y_ = rpy
+            for lbl, val in [("R", r_), ("P", p_), ("Y", y_)]:
+                bar_w  = W - PAD*2
+                filled = int(bar_w * min(abs(val) / 180.0, 1.0))
+                bar_col = AX_X if lbl=="R" else (AX_Y if lbl=="P" else AX_Z)
+                cv2.rectangle(canvas, (PAD, y+1), (PAD+bar_w, y+7), (225,225,225), -1)
+                cv2.rectangle(canvas, (PAD, y+1), (PAD+filled, y+7), bar_col, -1)
+                cv2.putText(canvas, f"{lbl} {val:+.0f}", (PAD, y+16),
+                            FONT, 0.28, bar_col, 1, cv2.LINE_AA)
+                y += 18
+        else:
+            cv2.putText(canvas, "no data", (PAD, y+8), FONT, 0.27, TXT_L, 1, cv2.LINE_AA)
+            y += 14
+
+        # ── Grasp ─────────────────────────────────────────────────────────────
+        if grasp_data and side in grasp_data:
+            gt, ap, cs_ = grasp_data[side]
+            # Grasp type badge
+            cv2.putText(canvas, gt, (PAD, y+9), FONT_B, 0.34, TXT_D, 1, cv2.LINE_AA)
+            y += 12
+            cv2.putText(canvas, f"ap {ap*100:.1f}cm  {cs_}",
+                        (PAD, y+9), FONT, 0.27, TXT_G, 1, cv2.LINE_AA)
+            y += 13
+
+        # ── Joint angles ─────────────────────────────────────────────────────
+        if joint_data and side in joint_data:
+            fja = joint_data[side]
+            cv2.putText(canvas, "joints (deg)", (PAD, y+8),
+                        FONT, 0.25, TXT_G, 1, cv2.LINE_AA)
+            y += 11
+            fingers = [
+                ("Th", ["thumb_mcp","thumb_ip"],           ["MCP","IP"]),
+                ("Ix", ["idx_mcp","idx_pip","idx_dip"],    ["M","P","D"]),
+                ("Md", ["mid_mcp","mid_pip","mid_dip"],    ["M","P","D"]),
+                ("Rg", ["ring_mcp","ring_pip","ring_dip"], ["M","P","D"]),
+                ("Pk", ["pinky_mcp","pinky_pip","pinky_dip"],["M","P","D"]),
+            ]
+            bar_full = W - PAD*2
+            for abbr, keys, lbls in fingers:
+                if y >= H - 14: break
+                cv2.putText(canvas, abbr, (PAD, y+8), FONT_B, 0.28, TXT_D, 1, cv2.LINE_AA)
+                bx = PAD + 16
+                slot_w = (bar_full - 16) // len(keys)
+                for k, _ in zip(keys, lbls):
+                    ang = fja[k]
+                    blen = int(slot_w * min(ang / 180.0, 1.0))
+                    cv2.rectangle(canvas, (bx, y+1), (bx+slot_w-2, y+6), (220,220,220), -1)
+                    cv2.rectangle(canvas, (bx, y+1), (bx+blen, y+6),     hcol, -1)
+                    cv2.putText(canvas, f"{ang:.0f}", (bx, y+14),
+                                FONT, 0.22, TXT_G, 1, cv2.LINE_AA)
+                    bx += slot_w
+                y += 16
+
+        # ── EE speed (from rpy_data placeholder — passed if available) ────────
+        y += 4
+        cv2.line(canvas, (PAD, y), (W-PAD, y), BORDER, 1)
+        y += 8
 
     return canvas
 
@@ -550,25 +710,29 @@ def draw_body_panel(W, H, pose_arr, hands_at_wrist):
 #  FRAME COMPOSITOR
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def build_frame(frame, nlms, hness, cur_hands, rpy_data, pose_arr, haw,
+def build_frame(frame, nlms, hness, cur_hands, rpy_data,
+                grasp_data, joint_data,
+                pose_arr, haw,
                 out_w, out_h,
                 macro_task, micro_step, step_idx, total_steps,
                 t0, tc, nl_caption, env, scene, oph):
+    INFO_W = 185                          # narrow centre strip
     cam_w  = int(out_w * 0.42)
-    plot_w = out_w - cam_w - 1
+    plot_w = out_w - cam_w - INFO_W - 2   # 2 dividers
     plot_h = out_h // 2
 
     left      = draw_left(frame, nlms, hness, cam_w, out_h,
                           macro_task, micro_step, step_idx, total_steps,
                           t0, tc, nl_caption, env, scene, oph)
+    info      = draw_info_panel(INFO_W, out_h, rpy_data, grasp_data, joint_data)
     top_right = draw_hand_panel(plot_w, plot_h, cur_hands, rpy_data)
     bot_right = draw_body_panel(plot_w, plot_h, pose_arr, haw)
 
     right = np.vstack([top_right, bot_right])
     cv2.line(right, (0, plot_h), (plot_w, plot_h), BORDER, 1)
-    div   = np.full((out_h, 1, 3), BORDER, np.uint8)
+    div = np.full((out_h, 1, 3), BORDER, np.uint8)
 
-    card = np.hstack([left, div, right])
+    card = np.hstack([left, div, info, div, right])
     cv2.rectangle(card, (0,0), (card.shape[1]-1, card.shape[0]-1), BORDER, 2)
     return card
 
@@ -664,10 +828,29 @@ def process_video(input_path,
         ["roll_deg","pitch_deg","yaw_deg"] +
         [f"nx{i}" for i in range(21)] +   # height-normalised xyz
         [f"ny{i}" for i in range(21)] +
-        [f"nz{i}" for i in range(21)]
+        [f"nz{i}" for i in range(21)] +
+        # Feature 1: dedicated end-effector
+        ["ee_x","ee_y","ee_z"] +
+        # Feature 2: finger joint angles (14)
+        ["thumb_mcp","thumb_ip",
+         "idx_mcp","idx_pip","idx_dip",
+         "mid_mcp","mid_pip","mid_dip",
+         "ring_mcp","ring_pip","ring_dip",
+         "pinky_mcp","pinky_pip","pinky_dip"] +
+        # Feature 3: grasp configuration (3)
+        ["grasp_type","finger_aperture_m","contact_state"] +
+        # Feature 4: velocity & acceleration (8)
+        ["ee_vx","ee_vy","ee_vz","ee_speed",
+         "ee_ax","ee_ay","ee_az","ee_accel"]
     )
 
     jsonl_records = []
+
+    # Per-hand state for velocity / acceleration across frames
+    hand_state = {
+        "Left":  {"prev_xyz": None, "prev_vel": None, "prev_ts": None},
+        "Right": {"prev_xyz": None, "prev_vel": None, "prev_ts": None},
+    }
 
     with (mp_vision.HandLandmarker.create_from_options(hand_opts) as h_det,
           mp_vision.PoseLandmarker.create_from_options(pose_opts) as p_det):
@@ -694,6 +877,7 @@ def process_video(input_path,
             micro_step, step_idx, total_steps = step_at(tc, timeline)
 
             nlms, hness, cur_hands, haw, rpy_data = [], [], [], {}, {}
+            grasp_data, joint_data = {}, {}
             frame_json_hands = []
 
             if h_res.hand_world_landmarks:
@@ -719,23 +903,78 @@ def process_video(input_path,
                     # Height-normalised coordinates
                     lms_norm = normalize_pose(lms_w, op_height, robot_height)
 
+                    # Feature 1 — dedicated end-effector (wrist)
+                    ee_xyz = lms_w[0]
+
+                    # Feature 2 — finger joint angles
+                    fja = finger_joint_angles(lms_w)
+
+                    # Feature 3 — grasp configuration
+                    g_type, g_aperture, g_contact = classify_grasp(lms_w)
+                    grasp_data[label] = (g_type, g_aperture, g_contact)
+                    joint_data[label] = fja
+
+                    # Feature 4 — velocity & acceleration (finite difference on wrist)
+                    hs = hand_state.setdefault(
+                        label, {"prev_xyz": None, "prev_vel": None, "prev_ts": None})
+                    dt = (tc - hs["prev_ts"]) if hs["prev_ts"] is not None else (skip / fps)
+                    if dt < 1e-9:
+                        dt = skip / fps
+                    vel   = ((ee_xyz - hs["prev_xyz"]) / dt
+                             if hs["prev_xyz"] is not None else np.zeros(3))
+                    accel = ((vel - hs["prev_vel"]) / dt
+                             if hs["prev_vel"] is not None else np.zeros(3))
+                    ee_speed     = float(np.linalg.norm(vel))
+                    ee_accel_mag = float(np.linalg.norm(accel))
+                    hs["prev_xyz"] = ee_xyz.copy()
+                    hs["prev_vel"] = vel.copy()
+                    hs["prev_ts"]  = tc
+
                     # CSV row
                     row = ([fidx, label, f"{tc:.3f}",
                             macro_task, micro_step, step_idx,
                             op_height, robot_height, environment, scene] +
                            lms_w[:,0].tolist() + lms_w[:,1].tolist() + lms_w[:,2].tolist() +
                            [round(roll,3), round(pitch,3), round(yaw,3)] +
-                           lms_norm[:,0].tolist() + lms_norm[:,1].tolist() + lms_norm[:,2].tolist())
+                           lms_norm[:,0].tolist() + lms_norm[:,1].tolist() + lms_norm[:,2].tolist() +
+                           # EE
+                           [round(float(ee_xyz[0]),6), round(float(ee_xyz[1]),6), round(float(ee_xyz[2]),6)] +
+                           # Joint angles
+                           [round(fja["thumb_mcp"],3), round(fja["thumb_ip"],3),
+                            round(fja["idx_mcp"],3),   round(fja["idx_pip"],3),   round(fja["idx_dip"],3),
+                            round(fja["mid_mcp"],3),   round(fja["mid_pip"],3),   round(fja["mid_dip"],3),
+                            round(fja["ring_mcp"],3),  round(fja["ring_pip"],3),  round(fja["ring_dip"],3),
+                            round(fja["pinky_mcp"],3), round(fja["pinky_pip"],3), round(fja["pinky_dip"],3)] +
+                           # Grasp
+                           [g_type, round(g_aperture,6), g_contact] +
+                           # Velocity & acceleration
+                           [round(float(vel[0]),6),   round(float(vel[1]),6),   round(float(vel[2]),6),
+                            round(ee_speed,6),
+                            round(float(accel[0]),6), round(float(accel[1]),6), round(float(accel[2]),6),
+                            round(ee_accel_mag,6)])
                     csv_rows.append(row)
 
                     # JSONL record
                     frame_json_hands.append({
-                        "hand":  label,
-                        "xyz":   lms_w.tolist(),
-                        "roll":  round(roll,3),
-                        "pitch": round(pitch,3),
-                        "yaw":   round(yaw,3),
+                        "hand":     label,
+                        "xyz":      lms_w.tolist(),
+                        "roll":     round(roll,3),
+                        "pitch":    round(pitch,3),
+                        "yaw":      round(yaw,3),
                         "xyz_norm": lms_norm.tolist(),
+                        # Feature 1
+                        "ee_xyz":   [round(float(v),6) for v in ee_xyz],
+                        # Feature 2
+                        "joint_angles": {k: round(v,3) for k,v in fja.items()},
+                        # Feature 3
+                        "grasp_type":        g_type,
+                        "finger_aperture_m": round(g_aperture,6),
+                        "contact_state":     g_contact,
+                        # Feature 4
+                        "ee_velocity":  [round(float(v),6) for v in vel],
+                        "ee_speed":     round(ee_speed,6),
+                        "ee_accel":     [round(float(v),6) for v in accel],
+                        "ee_accel_mag": round(ee_accel_mag,6),
                     })
 
             # Pose
@@ -763,7 +1002,9 @@ def process_video(input_path,
             # Render frame
             if writer:
                 out_frame = build_frame(
-                    frame, nlms, hness, cur_hands, rpy_data, pose_arr, haw,
+                    frame, nlms, hness, cur_hands, rpy_data,
+                    grasp_data, joint_data,
+                    pose_arr, haw,
                     out_w, out_h,
                     macro_task, micro_step, step_idx, total_steps,
                     ts_start, tc, nl_caption, environment, scene, op_height)
