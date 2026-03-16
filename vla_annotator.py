@@ -478,7 +478,7 @@ def draw_hand_panel(W, H, current_hands, rpy_data, cube_half=0.12):
 
     pad_l = int(W * 0.15); pad_b = int(H * 0.15)
     CX = pad_l + (W - pad_l) // 2
-    CY = (H - pad_b) // 2
+    CY = (H - pad_b) // 2 + int(H * 0.15)   # shift down so fingers don't clip top
     SC = min(W - pad_l, H - pad_b) / (cube_half * 1.8)
 
     draw_grid(canvas, R, CX, CY, SC, cube_half)
@@ -644,7 +644,7 @@ def draw_body_panel(W, H, pose_arr, hands_at_wrist):
     pad_l, pad_b = int(W*0.14), int(H*0.14)
     CX = pad_l + (W-pad_l)//2
     CY = (H-pad_b)//2
-    SC = min(W-pad_l, H-pad_b) / (half*2.8)
+    SC = min(W-pad_l, H-pad_b) / (half*2.1)   # zoomed in for clearer body plot
 
     offset  = np.array([cx3, cy3, 0.0])
     sk_c    = {k: v - offset for k,v in sk.items()}
