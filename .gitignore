@@ -19,3 +19,5 @@ factory001_worker001_part01/part3338/
 factory001_worker001_part01/part409/
 factory001_worker001_part01/part6430.tar
 factory001_worker001_part01/part6430/
+*.tar
+factory*
